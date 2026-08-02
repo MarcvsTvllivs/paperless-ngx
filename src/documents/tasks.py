@@ -11,6 +11,7 @@ from tempfile import mkstemp
 from celery import Task
 from celery import shared_task
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from django.db import transaction
@@ -22,7 +23,9 @@ from documents import sanity_checker
 from documents.barcodes import BarcodePlugin
 from documents.bulk_download import ArchiveOnlyStrategy
 from documents.bulk_download import OriginalsOnlyStrategy
+from documents.caching import CACHE_1_WEEK
 from documents.caching import clear_document_caches
+from documents.caching import set_llm_suggestions_cache
 from documents.classifier import DocumentClassifier
 from documents.classifier import load_classifier
 from documents.consumer import AsnCheckPlugin
@@ -69,9 +72,15 @@ from paperless.config import AIConfig
 from paperless.logging import consume_task_id
 from paperless.parsers import ParserContext
 from paperless.parsers.registry import get_parser_registry
+from paperless_ai.ai_classifier import get_ai_document_classification
 from paperless_ai.indexing import llm_index_add_or_update_document
 from paperless_ai.indexing import llm_index_remove_document
 from paperless_ai.indexing import update_llm_index
+from paperless_ai.matching import extract_unmatched_names
+from paperless_ai.matching import match_correspondents_by_name
+from paperless_ai.matching import match_document_types_by_name
+from paperless_ai.matching import match_storage_paths_by_name
+from paperless_ai.matching import match_tags_by_name
 
 if settings.AUDIT_LOG_ENABLED:
     from auditlog.models import LogEntry
@@ -712,6 +721,107 @@ def update_document_in_llm_index(document) -> None:
 @shared_task
 def remove_document_from_llm_index(document) -> None:
     llm_index_remove_document(document)
+
+
+@shared_task
+def prewarm_ai_suggestions(document) -> None:
+    """
+    Generate the AI suggestions for a document ahead of time and put them in the
+    cache, so the first request for them does not have to wait for the LLM.
+
+    Suggestions are cached per language, so they are generated for the owner of
+    the document, falling back to a superuser for documents without an owner.
+
+    This is best effort: an unreachable or misconfigured LLM backend must not
+    affect consumption, the suggestions are generated on demand instead.
+    """
+    try:
+        user = (
+            document.owner
+            or User.objects.filter(is_superuser=True).order_by("pk").first()
+        )
+        ai_config = AIConfig()
+
+        # The payload and the identifier it is cached under mirror
+        # DocumentViewSet.ai_suggestions, so that the request which follows is a
+        # cache hit rather than a second, differently keyed generation.
+        output_language = ai_config.llm_output_language
+        if (
+            not output_language
+            and user is not None
+            and hasattr(user, "ui_settings")
+            and isinstance(
+                user.ui_settings.settings,
+                dict,
+            )
+        ):
+            output_language = user.ui_settings.settings.get("language")
+        llm_cache_backend = ":".join(
+            part
+            for part in (
+                ai_config.llm_backend,
+                ai_config.llm_model,
+                ai_config.llm_endpoint,
+                output_language,
+            )
+            if part
+        )
+
+        llm_suggestions = get_ai_document_classification(
+            document,
+            user,
+            output_language,
+        )
+
+        matched_tags = match_tags_by_name(llm_suggestions.get("tags", []), user)
+        matched_correspondents = match_correspondents_by_name(
+            llm_suggestions.get("correspondents", []),
+            user,
+        )
+        matched_types = match_document_types_by_name(
+            llm_suggestions.get("document_types", []),
+            user,
+        )
+        matched_paths = match_storage_paths_by_name(
+            llm_suggestions.get("storage_paths", []),
+            user,
+        )
+
+        set_llm_suggestions_cache(
+            document.pk,
+            {
+                "title": llm_suggestions.get("title"),
+                "tags": [t.id for t in matched_tags],
+                "suggested_tags": extract_unmatched_names(
+                    llm_suggestions.get("tags", []),
+                    matched_tags,
+                ),
+                "correspondents": [c.id for c in matched_correspondents],
+                "suggested_correspondents": extract_unmatched_names(
+                    llm_suggestions.get("correspondents", []),
+                    matched_correspondents,
+                ),
+                "document_types": [d.id for d in matched_types],
+                "suggested_document_types": extract_unmatched_names(
+                    llm_suggestions.get("document_types", []),
+                    matched_types,
+                ),
+                "storage_paths": [s.id for s in matched_paths],
+                "suggested_storage_paths": extract_unmatched_names(
+                    llm_suggestions.get("storage_paths", []),
+                    matched_paths,
+                ),
+                "dates": llm_suggestions.get("dates", []),
+            },
+            backend=llm_cache_backend,
+            timeout=CACHE_1_WEEK,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to pre-warm AI suggestions for document %s: %s",
+            document.pk,
+            exc,
+        )
 
 
 @shared_task
