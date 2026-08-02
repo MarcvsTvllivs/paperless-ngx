@@ -46,6 +46,7 @@ LLM_CACHE_CLASSIFIER_VERSION: Final[int] = 1000  # Marker distinguishing LLM sug
 CACHE_1_MINUTE: Final[int] = 60
 CACHE_5_MINUTES: Final[int] = 5 * CACHE_1_MINUTE
 CACHE_50_MINUTES: Final[int] = 50 * CACHE_1_MINUTE
+CACHE_1_WEEK: Final[int] = 7 * 24 * 60 * CACHE_1_MINUTE
 
 read_cache = caches["read-cache"]
 
