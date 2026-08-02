@@ -416,14 +416,18 @@ class RemoteDocumentParser:
         # those to replace, their embedded text beats any OCR of a rendered
         # page, and the strip step in parse() would blank them.
         if mime_type == "application/pdf" and path is not None:
-            from paperless.parsers.utils import PDF_TEXT_MIN_LENGTH
-            from paperless.parsers.utils import extract_pdf_text
-            from paperless.parsers.utils import is_tagged_pdf
+            # 3.0.5 moved this predicate out of documents.consumer into
+            # pdf_born_digital_text(), which normalises the extracted text
+            # through post_process_text() before measuring it (GH #13387):
+            # raw pdftotext output can be non-empty whitespace and form-feed
+            # padding with no real content behind it. Calling the wrapper
+            # rather than re-deriving it keeps this gate identical to the
+            # archive-generation decision, which is the whole point of it,
+            # and matters here because padded OCR layers are common in this
+            # archive (one document: 3,131 raw characters, 1,232 real).
+            from paperless.parsers.utils import pdf_born_digital_text
 
-            text = extract_pdf_text(path)
-            has_text = is_tagged_pdf(path) or (
-                text is not None and len(text) > PDF_TEXT_MIN_LENGTH
-            )
+            _text, has_text = pdf_born_digital_text(path, log=logger)
             if has_text:
                 if not _force_all_active():
                     logger.debug(
