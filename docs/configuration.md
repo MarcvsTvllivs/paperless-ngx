@@ -2160,6 +2160,11 @@ used with the OpenAI-compatible backend to target a custom provider or local gat
 been consumed, so they are already cached when they are first requested. This spends one LLM
 request per consumed document, whether or not the suggestions are ever looked at.
 
+    Suggestions are cached per output language and only one set is cached per document. They are
+generated for the owner of the document, or for a superuser if it has none, so unless
+[`PAPERLESS_AI_LLM_OUTPUT_LANGUAGE`](#PAPERLESS_AI_LLM_OUTPUT_LANGUAGE) is set, a pre-warmed
+document is only a cache hit for users whose display language matches that user's.
+
     Defaults to false.
 
 #### [`PAPERLESS_LLM_INDEX_TASK_CRON=<cron expression>`](#PAPERLESS_LLM_INDEX_TASK_CRON) {#PAPERLESS_LLM_INDEX_TASK_CRON}

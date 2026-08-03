@@ -816,6 +816,11 @@ def prewarm_ai_suggestions(document) -> None:
             backend=llm_cache_backend,
             timeout=CACHE_1_WEEK,
         )
+        logger.info(
+            "Pre-warmed AI suggestions for document %s, cached for %s",
+            document.pk,
+            llm_cache_backend,
+        )
     except Exception as exc:
         logger.warning(
             "Failed to pre-warm AI suggestions for document %s: %s",
