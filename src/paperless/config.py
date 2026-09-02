@@ -277,3 +277,9 @@ class AIConfig(BaseConfig):
     @property
     def llm_index_enabled(self) -> bool:
         return bool(self.ai_enabled and self.llm_embedding_backend)
+
+    @property
+    def suggestions_prewarm_enabled(self) -> bool:
+        return bool(
+            self.ai_enabled and self.llm_backend and settings.AI_SUGGESTIONS_PREWARM,
+        )
