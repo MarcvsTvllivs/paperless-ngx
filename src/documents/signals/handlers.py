@@ -1425,6 +1425,20 @@ def add_or_update_document_in_llm_index(sender, document, **kwargs):
         update_document_in_llm_index.apply_async(kwargs={"document": document})
 
 
+def prewarm_ai_suggestions_for_document(sender, document, **kwargs):
+    """
+    Generate the AI suggestions for a newly consumed document in the background,
+    so they are cached by the time they are requested for it.
+    """
+    if kwargs.get("skip_ai_index"):
+        return
+    ai_config = AIConfig()
+    if ai_config.suggestions_prewarm_enabled:
+        from documents.tasks import prewarm_ai_suggestions
+
+        prewarm_ai_suggestions.apply_async(kwargs={"document": document})
+
+
 @receiver(models.signals.post_delete, sender=Document)
 def delete_document_from_llm_index(
     sender: Any,

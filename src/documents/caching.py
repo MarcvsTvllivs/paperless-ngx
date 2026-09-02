@@ -59,8 +59,12 @@ LLM_CACHE_CLASSIFIER_VERSION: Final[int] = 1002
 CACHE_1_MINUTE: Final[int] = 60
 CACHE_5_MINUTES: Final[int] = 5 * CACHE_1_MINUTE
 CACHE_50_MINUTES: Final[int] = 50 * CACHE_1_MINUTE
-# Deliberately longer than any entry it names
-LLM_CACHE_GENERATION_TIMEOUT: Final[int] = 2 * CACHE_50_MINUTES
+CACHE_1_WEEK: Final[int] = 7 * 24 * 60 * CACHE_1_MINUTE
+# Deliberately longer than any entry it names. Pre-warmed suggestions
+# (documents.tasks.prewarm_ai_suggestions) live for CACHE_1_WEEK, so the
+# generation token that keys them has to outlive that, or the entry is
+# orphaned as soon as the token expires.
+LLM_CACHE_GENERATION_TIMEOUT: Final[int] = CACHE_1_WEEK + 2 * CACHE_50_MINUTES
 
 read_cache = caches["read-cache"]
 

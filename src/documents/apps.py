@@ -13,6 +13,7 @@ class DocumentsConfig(AppConfig):
         from documents.signals.handlers import add_inbox_tags
         from documents.signals.handlers import add_or_update_document_in_llm_index
         from documents.signals.handlers import add_to_index
+        from documents.signals.handlers import prewarm_ai_suggestions_for_document
         from documents.signals.handlers import run_workflows_added
         from documents.signals.handlers import run_workflows_updated
         from documents.signals.handlers import send_websocket_document_updated
@@ -29,6 +30,7 @@ class DocumentsConfig(AppConfig):
         document_consumption_finished.connect(add_to_index)
         document_consumption_finished.connect(run_workflows_added)
         document_consumption_finished.connect(add_or_update_document_in_llm_index)
+        document_consumption_finished.connect(prewarm_ai_suggestions_for_document)
         document_updated.connect(run_workflows_updated)
         document_updated.connect(send_websocket_document_updated)
         document_updated.connect(add_or_update_document_in_llm_index)

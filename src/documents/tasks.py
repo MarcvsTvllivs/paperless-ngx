@@ -11,6 +11,7 @@ from tempfile import mkstemp
 from celery import Task
 from celery import shared_task
 from django.conf import settings
+from django.contrib.auth.models import User
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from django.db import transaction
@@ -22,7 +23,9 @@ from documents import sanity_checker
 from documents.barcodes import BarcodePlugin
 from documents.bulk_download import ArchiveOnlyStrategy
 from documents.bulk_download import OriginalsOnlyStrategy
+from documents.caching import CACHE_1_WEEK
 from documents.caching import clear_document_caches
+from documents.caching import set_llm_suggestions_cache
 from documents.classifier import DocumentClassifier
 from documents.classifier import load_classifier
 from documents.consumer import AsnCheckPlugin
@@ -71,6 +74,8 @@ from paperless.config import RemoteOCRConfig
 from paperless.logging import consume_task_id
 from paperless.parsers import ParserContext
 from paperless.parsers.registry import get_parser_registry
+from paperless_ai.ai_classifier import get_ai_document_classification
+from paperless_ai.ai_classifier import get_llm_output_language
 from paperless_ai.exceptions import LLMTimeoutError
 from paperless_ai.indexing import llm_index_add_or_update_document
 from paperless_ai.indexing import llm_index_remove_document
@@ -762,6 +767,76 @@ def update_document_in_llm_index(document) -> None:
 @shared_task
 def remove_document_from_llm_index(document) -> None:
     llm_index_remove_document(document)
+
+
+@shared_task
+def prewarm_ai_suggestions(document) -> None:
+    """
+    Generate the AI suggestions for a document ahead of time and put them in the
+    cache, so the first request for them does not have to wait for the LLM.
+
+    Mirrors DocumentViewSet.ai_suggestions: the raw model choices are cached
+    under the same (backend, model, endpoint, language, user) key the view
+    computes, so the request that follows is a cache hit rather than a second,
+    differently keyed generation. Object ids are never cached, the view
+    resolves and permission-filters them freshly on every request.
+
+    The cache key carries the requesting user, so the entry is warmed for the
+    owner of the document, falling back to a superuser for documents without
+    an owner.
+
+    This is best effort: an unreachable or misconfigured LLM backend must not
+    affect consumption, the suggestions are generated on demand instead.
+    """
+    try:
+        user = (
+            document.owner
+            or User.objects.filter(is_superuser=True).order_by("pk").first()
+        )
+        if user is None:
+            logger.info(
+                "Not pre-warming AI suggestions for document %s: no user to warm for",
+                document.pk,
+            )
+            return
+        ai_config = AIConfig()
+
+        output_language = get_llm_output_language(ai_config=ai_config, user=user)
+        llm_cache_backend = ":".join(
+            part
+            for part in (
+                ai_config.llm_backend,
+                ai_config.llm_model,
+                ai_config.llm_endpoint,
+                output_language,
+                f"user={user.pk}",
+            )
+            if part
+        )
+
+        llm_suggestions = get_ai_document_classification(
+            document,
+            user,
+            output_language,
+        )
+
+        set_llm_suggestions_cache(
+            document.pk,
+            llm_suggestions,
+            backend=llm_cache_backend,
+            timeout=CACHE_1_WEEK,
+        )
+        logger.info(
+            "Pre-warmed AI suggestions for document %s, cached for %s",
+            document.pk,
+            llm_cache_backend,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to pre-warm AI suggestions for document %s: %s",
+            document.pk,
+            exc,
+        )
 
 
 @shared_task
