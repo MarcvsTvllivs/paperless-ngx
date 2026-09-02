@@ -2244,6 +2244,19 @@ models refuse tool calls on the chat completions API unless reasoning is off:
 
     Defaults to empty, which adds nothing to requests.
 
+#### [`PAPERLESS_AI_SUGGESTIONS_PREWARM=<bool>`](#PAPERLESS_AI_SUGGESTIONS_PREWARM) {#PAPERLESS_AI_SUGGESTIONS_PREWARM}
+
+: If set to true, the AI suggestions for a document are generated in the background once it has
+been consumed, so they are already cached when they are first requested. This spends one LLM
+request per consumed document, whether or not the suggestions are ever looked at.
+
+    Suggestions are cached per output language and only one set is cached per document. They are
+generated for the owner of the document, or for a superuser if it has none, so unless
+[`PAPERLESS_AI_LLM_OUTPUT_LANGUAGE`](#PAPERLESS_AI_LLM_OUTPUT_LANGUAGE) is set, a pre-warmed
+document is only a cache hit for users whose display language matches that user's.
+
+    Defaults to false.
+
 #### [`PAPERLESS_LLM_INDEX_TASK_CRON=<cron expression>`](#PAPERLESS_LLM_INDEX_TASK_CRON) {#PAPERLESS_LLM_INDEX_TASK_CRON}
 
 : Configures the schedule to update the AI embeddings of text content and metadata for all documents. Only performed if
