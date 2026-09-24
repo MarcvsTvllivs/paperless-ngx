@@ -330,6 +330,83 @@ def _strip_text_layer(path: Path, tempdir: Path) -> Path | None:
     return out
 
 
+def _normalise_glyph_widths(path: Path) -> bool:
+    """Make the engine's declared glyph advance match its embedded font.
+
+    LOCAL PATCH (2026-09-24). Azure's searchable PDF sets each word in one
+    ``Tj`` with a per-word ``Tz`` horizontal scale, and declares the font's
+    default advance as ``/DW 625`` while the embedded TrueType glyphs advance
+    500. Viewers and pdftotext handle the raw file fine, but Ghostscript (the
+    PDF/A step in ``_optimize_archive``) trusts the glyph metrics and keeps
+    the positions by kerning 125 units after every glyph, and poppler's word
+    breaker then reads each of those gaps as a space: ``Tel: 0 3 0 - 710 4 7
+    0 7 5``. Measured on doc 8601: Azure's raw PDF extracts word-for-word
+    clean, the archive copy did not.
+
+    Scaling every ``Tz`` by DW/real and setting DW to the real advance
+    leaves the geometry byte-for-byte equivalent (advance = width x Tz), so
+    Ghostscript has nothing to kern and the PDF/A archive extracts exactly
+    like the raw file. Fonts with an explicit ``/W`` array are left alone.
+
+    Returns True when the file was rewritten. Fails open: any surprise leaves
+    the file untouched, which only means the old letter-spaced layer.
+    """
+    import io
+    from decimal import Decimal
+
+    import pikepdf
+    from fontTools.ttLib import TTFont
+
+    try:
+        with pikepdf.open(path, allow_overwriting_input=True) as pdf:
+            rewritten = 0
+            for page in pdf.pages:
+                factors: dict[str, float] = {}
+                for name, font in page.Resources.get("/Font", {}).items():
+                    if "/DescendantFonts" not in font:
+                        continue
+                    cid = font.DescendantFonts[0]
+                    if "/W" in cid or "/FontFile2" not in cid.FontDescriptor:
+                        continue
+                    ttf = TTFont(io.BytesIO(cid.FontDescriptor.FontFile2.read_bytes()))
+                    upem = ttf["head"].unitsPerEm
+                    advances = {
+                        round(adv * 1000 / upem)
+                        for adv, _ in ttf["hmtx"].metrics.values()
+                        if adv
+                    }
+                    declared = int(cid.get("/DW", 1000))
+                    if len(advances) != 1 or declared in advances:
+                        continue
+                    real = advances.pop()
+                    factors[str(name)] = declared / real
+                    cid.DW = real
+                if not factors:
+                    continue
+                ops = pikepdf.parse_content_stream(page)
+                font_name = None
+                for i, op in enumerate(ops):
+                    if op.operator == pikepdf.Operator("Tf"):
+                        font_name = str(op.operands[0])
+                    elif op.operator == pikepdf.Operator("Tz") and font_name in factors:
+                        scaled = Decimal(f"{float(op.operands[0]) * factors[font_name]:.4g}")
+                        ops[i] = pikepdf.ContentStreamInstruction([scaled], op.operator)
+                page.Contents = pdf.make_stream(pikepdf.unparse_content_stream(ops))
+                rewritten += 1
+            if rewritten:
+                pdf.save()
+    except Exception:
+        logger.warning(
+            "Could not normalise glyph widths in %s, keeping it as-is",
+            path.name,
+            exc_info=True,
+        )
+        return False
+    if rewritten:
+        logger.info("Normalised glyph widths on %d page(s) of %s", rewritten, path.name)
+    return bool(rewritten)
+
+
 class RemoteEngineConfig:
     """Holds and validates the remote OCR engine configuration."""
 
@@ -882,6 +959,7 @@ class RemoteDocumentParser:
                         result_id=result_id,
                     ):
                         f.write(chunk)
+                _normalise_glyph_widths(raw)
 
                 if splice_into is not None:
                     original, pages = splice_into

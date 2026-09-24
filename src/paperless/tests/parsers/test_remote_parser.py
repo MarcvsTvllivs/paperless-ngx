@@ -25,6 +25,7 @@ from paperless.models import ApplicationConfiguration
 from paperless.parsers import ParserContext
 from paperless.parsers import ParserProtocol
 from paperless.parsers.remote import RemoteDocumentParser
+from paperless.parsers.remote import _normalise_glyph_widths
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -633,3 +634,110 @@ class TestRemoteParserRegistry:
         )
 
         assert parser_cls is None
+
+
+# ---------------------------------------------------------------------------
+# Glyph-width normalisation (local patch, 2026-09-24)
+# ---------------------------------------------------------------------------
+
+
+def _azure_shaped_pdf(path: Path, *, declared_dw: int, real_advance: int) -> None:
+    """Write a one-page PDF laid out the way Azure's searchable PDF is.
+
+    One embedded TrueType whose every glyph advances *real_advance*, a CID
+    font declaring ``/DW declared_dw`` with no ``/W``, and one word set with
+    a ``Tz`` horizontal scale.
+    """
+    import io
+
+    import pikepdf
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+
+    fb = FontBuilder(1000, isTTF=True)
+    fb.setupGlyphOrder([".notdef", "a"])
+    fb.setupCharacterMap({ord("a"): "a"})
+    empty = TTGlyphPen(None).glyph()
+    fb.setupGlyf({".notdef": empty, "a": empty})
+    fb.setupHorizontalMetrics({".notdef": (real_advance, 0), "a": (real_advance, 0)})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "T", "styleName": "R"})
+    fb.setupOS2()
+    fb.setupPost()
+    buf = io.BytesIO()
+    fb.save(buf)
+
+    pdf = pikepdf.new()
+    descriptor = pdf.make_indirect(
+        pikepdf.Dictionary(
+            Type=pikepdf.Name.FontDescriptor,
+            FontName=pikepdf.Name("/T"),
+            Flags=4,
+            FontBBox=[0, -200, 1000, 800],
+            ItalicAngle=0,
+            Ascent=800,
+            Descent=-200,
+            CapHeight=700,
+            StemV=80,
+            FontFile2=pdf.make_stream(buf.getvalue()),
+        ),
+    )
+    cid = pdf.make_indirect(
+        pikepdf.Dictionary(
+            Type=pikepdf.Name.Font,
+            Subtype=pikepdf.Name.CIDFontType2,
+            BaseFont=pikepdf.Name("/T"),
+            CIDSystemInfo=pikepdf.Dictionary(
+                Registry=pikepdf.String("Adobe"),
+                Ordering=pikepdf.String("Identity"),
+                Supplement=0,
+            ),
+            FontDescriptor=descriptor,
+            DW=declared_dw,
+        ),
+    )
+    font = pdf.make_indirect(
+        pikepdf.Dictionary(
+            Type=pikepdf.Name.Font,
+            Subtype=pikepdf.Name.Type0,
+            BaseFont=pikepdf.Name("/T"),
+            Encoding=pikepdf.Name("/Identity-H"),
+            DescendantFonts=[cid],
+        ),
+    )
+    page = pdf.add_blank_page(page_size=(200, 100))
+    page.Resources = pikepdf.Dictionary(Font=pikepdf.Dictionary(F1=font))
+    page.Contents = pdf.make_stream(b"BT /F1 10 Tf 3 Tr 80 Tz <00010001> Tj ET")
+    pdf.save(path)
+
+
+class TestNormaliseGlyphWidths:
+    def _read(self, path: Path) -> tuple[int, list[float]]:
+        import pikepdf
+
+        with pikepdf.open(path) as pdf:
+            page = pdf.pages[0]
+            dw = int(page.Resources.Font.F1.DescendantFonts[0].DW)
+            tz = [
+                float(op.operands[0])
+                for op in pikepdf.parse_content_stream(page)
+                if op.operator == pikepdf.Operator("Tz")
+            ]
+        return dw, tz
+
+    def test_mismatched_dw_is_folded_into_tz(self, tmp_path: Path) -> None:
+        # Azure's shape: DW 625 over 500-unit glyphs, drawn at Tz 80.
+        # Same geometry after the rewrite: 500 * 100% == 625 * 80%.
+        path = tmp_path / "azure.pdf"
+        _azure_shaped_pdf(path, declared_dw=625, real_advance=500)
+
+        assert _normalise_glyph_widths(path) is True
+        assert self._read(path) == (500, [100.0])
+
+    def test_matching_widths_are_left_alone(self, tmp_path: Path) -> None:
+        path = tmp_path / "plain.pdf"
+        _azure_shaped_pdf(path, declared_dw=500, real_advance=500)
+        before = path.read_bytes()
+
+        assert _normalise_glyph_widths(path) is False
+        assert path.read_bytes() == before
