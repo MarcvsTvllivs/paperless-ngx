@@ -1,5 +1,9 @@
 # Changelog
 
+## paperless-ngx 3.3.4
+
+- No changes
+
 ## paperless-ngx 3.0.5
 
 ### Bug Fixes
